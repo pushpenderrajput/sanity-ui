@@ -1,10 +1,15 @@
 require('dotenv').config();
-const express = require('express');
+const express  = require('express');
 const { Pool } = require('pg');
 const path     = require('path');
+const bcrypt   = require('bcryptjs');
+const jwt      = require('jsonwebtoken');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'cerf-dev-secret-change-in-prod';
+if (!process.env.JWT_SECRET)
+  console.warn('[WARN] JWT_SECRET not set — using insecure default. Set it in .env for production.');
 
 // ── DB pool ───────────────────────────────────────────────────────────────────
 const pool = new Pool({
@@ -18,10 +23,21 @@ const pool = new Pool({
 async function initDB() {
   const client = await pool.connect();
   try {
-    // Create proper relational tables
+    // Users table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id            TEXT PRIMARY KEY,
+        email         TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at    TIMESTAMPTZ DEFAULT now()
+      );
+    `);
+
+    // Core tables — user_id is stored for audit only, never used to filter data
     await client.query(`
       CREATE TABLE IF NOT EXISTS instances (
         id         TEXT PRIMARY KEY,
+        user_id    TEXT,
         name       TEXT NOT NULL,
         url        TEXT NOT NULL,
         token      TEXT DEFAULT '',
@@ -31,6 +47,7 @@ async function initDB() {
 
       CREATE TABLE IF NOT EXISTS custom_apis (
         id         TEXT PRIMARY KEY,
+        user_id    TEXT,
         inst_id    TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
         label      TEXT NOT NULL,
         method     TEXT DEFAULT 'POST',
@@ -43,6 +60,7 @@ async function initDB() {
 
       CREATE TABLE IF NOT EXISTS inst_vars (
         inst_id    TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+        user_id    TEXT,
         key        TEXT NOT NULL,
         value      TEXT DEFAULT '',
         updated_at TIMESTAMPTZ DEFAULT now(),
@@ -51,12 +69,14 @@ async function initDB() {
 
       CREATE TABLE IF NOT EXISTS hidden_apis (
         inst_id    TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+        user_id    TEXT,
         api_id     TEXT NOT NULL,
         PRIMARY KEY (inst_id, api_id)
       );
 
       CREATE TABLE IF NOT EXISTS api_payloads (
         inst_id    TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+        user_id    TEXT,
         api_id     TEXT NOT NULL,
         payload    TEXT,
         updated_at TIMESTAMPTZ DEFAULT now(),
@@ -64,73 +84,10 @@ async function initDB() {
       );
     `);
 
-    // ── One-time migration from old blob table (if it exists and new tables are empty) ──
-    const { rows: legacyCheck } = await client.query(`
-      SELECT to_regclass('public.cerf_sms_config') AS tbl
-    `);
-    if (legacyCheck[0].tbl) {
-      const { rows: instCount } = await client.query('SELECT COUNT(*) FROM instances');
-      if (parseInt(instCount[0].count) === 0) {
-        const { rows: legacy } = await client.query(
-          "SELECT key, value FROM cerf_sms_config WHERE key = ANY($1)",
-          [['ci','cp','cc','cv','ch']]
-        );
-        if (legacy.length > 0) {
-          console.log('[DB] Migrating data from legacy blob table…');
-          const m = {};
-          legacy.forEach(r => { m[r.key] = r.value; });
-          const oldInsts   = JSON.parse(m['ci'] || '[]');
-          const oldApis    = JSON.parse(m['cc'] || '{}');
-          const oldVars    = JSON.parse(m['cv'] || '{}');
-          const oldHidden  = JSON.parse(m['ch'] || '{}');
-          const oldPayloads= JSON.parse(m['cp'] || '{}');
-
-          for (const inst of oldInsts) {
-            await client.query(
-              `INSERT INTO instances (id,name,url,token,cookie) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
-              [inst.id, inst.name, inst.url, inst.token||'', inst.cookie||'']
-            );
-          }
-          for (const [instId, apis] of Object.entries(oldApis)) {
-            for (let i=0; i<apis.length; i++) {
-              const a = apis[i];
-              await client.query(
-                `INSERT INTO custom_apis (id,inst_id,label,method,path,payload,channel,sort_order)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,
-                [a.id, instId, a.label, a.method||'POST', a.path,
-                 JSON.stringify(a.payload||{}), a.channel||'sms', i]
-              );
-            }
-          }
-          for (const [instId, vars] of Object.entries(oldVars)) {
-            for (const [k,v] of Object.entries(vars)) {
-              await client.query(
-                `INSERT INTO inst_vars (inst_id,key,value) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
-                [instId, k, v||'']
-              );
-            }
-          }
-          for (const [instId, apiIds] of Object.entries(oldHidden)) {
-            for (const apiId of apiIds) {
-              await client.query(
-                `INSERT INTO hidden_apis (inst_id,api_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-                [instId, apiId]
-              );
-            }
-          }
-          for (const [key, payload] of Object.entries(oldPayloads)) {
-            const under = key.indexOf('_');
-            if (under < 0) continue;
-            const instId = key.slice(0, under);
-            const apiId  = key.slice(under + 1);
-            await client.query(
-              `INSERT INTO api_payloads (inst_id,api_id,payload) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
-              [instId, apiId, payload]
-            );
-          }
-          console.log('[DB] Migration complete');
-        }
-      }
+    // Safe migration: add user_id column to pre-existing tables (no-op if already present).
+    // Drop the FK constraint if it exists so user_id becomes a plain audit TEXT column.
+    for (const tbl of ['instances','custom_apis','inst_vars','hidden_apis','api_payloads']) {
+      await client.query(`ALTER TABLE ${tbl} ADD COLUMN IF NOT EXISTS user_id TEXT`);
     }
 
     console.log('[DB] Schema ready');
@@ -143,9 +100,72 @@ async function initDB() {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ── Auth middleware ───────────────────────────────────────────────────────────
+// Validates the JWT. All data routes are behind this — but data is NOT scoped
+// to the user. Login is required to use the tool; data is shared by the team.
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer '))
+    return res.status(401).json({ error: 'Unauthorized — please log in' });
+  try {
+    req.user = jwt.verify(header.slice(7), JWT_SECRET);
+    next();
+  } catch (e) {
+    res.status(401).json({ error: 'Unauthorized — invalid or expired token' });
+  }
+}
+
+function newId() { return require('crypto').randomUUID(); }
+
+// ── POST /api/auth/register ───────────────────────────────────────────────────
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ error: 'email and password are required' });
+  if (password.length < 8)
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  try {
+    const hash = await bcrypt.hash(password, 12);
+    const id   = newId();
+    await pool.query(
+      `INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)`,
+      [id, email.toLowerCase().trim(), hash]
+    );
+    const token = jwt.sign({ userId: id, email }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({ token, email, userId: id });
+  } catch (e) {
+    if (e.code === '23505')
+      return res.status(409).json({ error: 'An account with that email already exists' });
+    console.error('[register]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/auth/login ──────────────────────────────────────────────────────
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ error: 'email and password are required' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, email, password_hash FROM users WHERE email = $1`,
+      [email.toLowerCase().trim()]
+    );
+    if (!rows.length) return res.status(401).json({ error: 'Invalid email or password' });
+    const user = rows[0];
+    const ok   = await bcrypt.compare(password, user.password_hash);
+    if (!ok)    return res.status(401).json({ error: 'Invalid email or password' });
+    const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({ token, email: user.email, userId: user.id });
+  } catch (e) {
+    console.error('[login]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── GET /api/config/version ───────────────────────────────────────────────────
-// Returns the latest updated_at across all tables — used for polling.
-app.get('/api/config/version', async (req, res) => {
+// Returns the latest updated_at across ALL shared data — used for team polling.
+app.get('/api/config/version', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT GREATEST(
@@ -156,17 +176,17 @@ app.get('/api/config/version', async (req, res) => {
       ) AS updated_at
     `);
     res.json({ updatedAt: rows[0].updated_at });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
 // ── GET /api/config ───────────────────────────────────────────────────────────
-// Returns all shared config — same shape the frontend expects.
-app.get('/api/config', async (req, res) => {
+// Returns ALL shared team data — visible to every logged-in user.
+app.get('/api/config', requireAuth, async (req, res) => {
   try {
     const [instR, apiR, varR, hidR, payR] = await Promise.all([
-      pool.query('SELECT * FROM instances ORDER BY updated_at'),
+      pool.query('SELECT * FROM instances   ORDER BY updated_at'),
       pool.query('SELECT * FROM custom_apis ORDER BY inst_id, sort_order, updated_at'),
       pool.query('SELECT * FROM inst_vars'),
       pool.query('SELECT * FROM hidden_apis'),
@@ -200,169 +220,165 @@ app.get('/api/config', async (req, res) => {
 
     const payloads = {};
     payR.rows.forEach(r => {
-      payloads[r.inst_id + '_' + r.api_id] = r.payload;
+      payloads[`${r.inst_id}_${r.api_id}`] = r.payload;
     });
 
     res.json({ instances, customApis, instVars, hiddenApis, payloads });
-  } catch (err) {
-    console.error('[GET /api/config]', err.message);
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    console.error('[GET /api/config]', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
-// ── POST /api/config ──────────────────────────────────────────────────────────
-// UPSERT ONLY — never deletes by absence. Deletions use explicit routes below.
-// This ensures one user's save never destroys another user's additions.
-app.post('/api/config', async (req, res) => {
-  const {
-    instances  = [],
-    customApis = {},
-    instVars   = {},
-    hiddenApis = {},
-    payloads   = {},
-  } = req.body;
+// ═════════════════════════════════════════════════════════════════════════════
+// Granular write endpoints — require auth; data is SHARED (no user_id filter).
+// user_id is recorded on each row as an audit trail only.
+// ═════════════════════════════════════════════════════════════════════════════
 
-  const client = await pool.connect();
+// ── Instances ─────────────────────────────────────────────────────────────────
+app.post('/api/instances', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const { id, name, url, token = '', cookie = '' } = req.body;
+  if (!id || !name || !url) return res.status(400).json({ error: 'id, name, url required' });
   try {
-    await client.query('BEGIN');
-
-    // ── Instances: upsert only ────────────────────────────────────────────────
-    for (const inst of instances) {
-      await client.query(
-        `INSERT INTO instances (id, name, url, token, cookie, updated_at)
-         VALUES ($1,$2,$3,$4,$5, now())
-         ON CONFLICT (id) DO UPDATE
-           SET name=$2, url=$3, token=$4, cookie=$5, updated_at=now()`,
-        [inst.id, inst.name, inst.url, inst.token||'', inst.cookie||'']
-      );
-    }
-
-    // ── Custom APIs: upsert only ──────────────────────────────────────────────
-    for (const [instId, apis] of Object.entries(customApis)) {
-      for (let i = 0; i < apis.length; i++) {
-        const a = apis[i];
-        await client.query(
-          `INSERT INTO custom_apis (id, inst_id, label, method, path, payload, channel, sort_order, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
-           ON CONFLICT (id) DO UPDATE
-             SET label=$3, method=$4, path=$5, payload=$6, channel=$7, sort_order=$8, updated_at=now()`,
-          [a.id, instId, a.label, a.method||'POST', a.path,
-           JSON.stringify(a.payload||{}), a.channel||'sms', i]
-        );
-      }
-    }
-
-    // ── Instance vars: upsert per key ─────────────────────────────────────────
-    // Key renames and deletes handled by DELETE /api/vars/:instId/:key
-    for (const [instId, vars] of Object.entries(instVars)) {
-      for (const [key, value] of Object.entries(vars)) {
-        await client.query(
-          `INSERT INTO inst_vars (inst_id, key, value, updated_at)
-           VALUES ($1,$2,$3, now())
-           ON CONFLICT (inst_id, key) DO UPDATE SET value=$3, updated_at=now()`,
-          [instId, key, value||'']
-        );
-      }
-    }
-
-    // ── Hidden APIs: insert new entries only ──────────────────────────────────
-    // Restoring (clearing) handled by DELETE /api/hidden/:instId
-    for (const [instId, apiIds] of Object.entries(hiddenApis)) {
-      for (const apiId of apiIds) {
-        await client.query(
-          `INSERT INTO hidden_apis (inst_id, api_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-          [instId, apiId]
-        );
-      }
-    }
-
-    // ── Payload overrides: upsert ─────────────────────────────────────────────
-    for (const [key, payload] of Object.entries(payloads)) {
-      const under  = key.indexOf('_');
-      if (under < 0) continue;
-      const instId = key.slice(0, under);
-      const apiId  = key.slice(under + 1);
-      await client.query(
-        `INSERT INTO api_payloads (inst_id, api_id, payload, updated_at)
-         VALUES ($1,$2,$3, now())
-         ON CONFLICT (inst_id, api_id) DO UPDATE SET payload=$3, updated_at=now()`,
-        [instId, apiId, payload]
-      );
-    }
-
-    await client.query('COMMIT');
+    await pool.query(
+      `INSERT INTO instances (id, user_id, name, url, token, cookie, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6, now())
+       ON CONFLICT (id) DO UPDATE
+         SET user_id=$2, name=$3, url=$4, token=$5, cookie=$6, updated_at=now()`,
+      [id, uid, name, url, token, cookie]
+    );
     res.json({ ok: true });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('[POST /api/config]', err.message);
-    res.status(500).json({ error: err.message });
-  } finally {
-    client.release();
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Explicit DELETE routes ────────────────────────────────────────────────────
-// These are the ONLY way rows get removed — never inferred from absence.
-
-// Delete an instance (cascades to all its APIs, vars, hidden entries, payloads)
-app.delete('/api/instances/:id', async (req, res) => {
+app.delete('/api/instances/:id', requireAuth, async (req, res) => {
   try {
     await pool.query('DELETE FROM instances WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Delete a single custom API
-app.delete('/api/apis/:apiId', async (req, res) => {
+// ── Custom APIs ───────────────────────────────────────────────────────────────
+app.post('/api/apis', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const { id, instId, label, method = 'POST', path: apiPath, payload = {}, channel = 'sms', sortOrder = 0 } = req.body;
+  if (!id || !instId || !label || !apiPath) return res.status(400).json({ error: 'id, instId, label, path required' });
   try {
-    await pool.query('DELETE FROM custom_apis WHERE id=$1', [req.params.apiId]);
+    await pool.query(
+      `INSERT INTO custom_apis (id, user_id, inst_id, label, method, path, payload, channel, sort_order, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+       ON CONFLICT (id) DO UPDATE
+         SET user_id=$2, label=$4, method=$5, path=$6, payload=$7, channel=$8, sort_order=$9, updated_at=now()`,
+      [id, uid, instId, label, method, apiPath, JSON.stringify(payload), channel, sortOrder]
+    );
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Clear all hidden APIs for an instance (Restore hidden)
-app.delete('/api/hidden/:instId', async (req, res) => {
+app.delete('/api/apis/:id', requireAuth, async (req, res) => {
   try {
-    await pool.query('DELETE FROM hidden_apis WHERE inst_id=$1', [req.params.instId]);
+    await pool.query('DELETE FROM custom_apis WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Delete a single variable
-app.delete('/api/vars/:instId/:key', async (req, res) => {
+// ── Variables ─────────────────────────────────────────────────────────────────
+app.post('/api/variables', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const { instId, key, value = '' } = req.body;
+  if (!instId || !key) return res.status(400).json({ error: 'instId and key required' });
   try {
-    await pool.query('DELETE FROM inst_vars WHERE inst_id=$1 AND key=$2',
-      [req.params.instId, decodeURIComponent(req.params.key)]);
+    await pool.query(
+      `INSERT INTO inst_vars (inst_id, user_id, key, value, updated_at)
+       VALUES ($1,$2,$3,$4, now())
+       ON CONFLICT (inst_id, key) DO UPDATE SET user_id=$2, value=$4, updated_at=now()`,
+      [instId, uid, key, value]
+    );
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Clear all variables for an instance
-app.delete('/api/vars/:instId', async (req, res) => {
+app.delete('/api/variables/:instId/:key', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM inst_vars WHERE inst_id=$1 AND key=$2',
+      [req.params.instId, decodeURIComponent(req.params.key)]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/variables/:instId', requireAuth, async (req, res) => {
   try {
     await pool.query('DELETE FROM inst_vars WHERE inst_id=$1', [req.params.instId]);
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Payloads ──────────────────────────────────────────────────────────────────
+app.post('/api/payloads', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const { instId, apiId, payload } = req.body;
+  if (!instId || !apiId) return res.status(400).json({ error: 'instId and apiId required' });
+  try {
+    await pool.query(
+      `INSERT INTO api_payloads (inst_id, user_id, api_id, payload, updated_at)
+       VALUES ($1,$2,$3,$4, now())
+       ON CONFLICT (inst_id, api_id) DO UPDATE SET user_id=$2, payload=$4, updated_at=now()`,
+      [instId, uid, apiId, payload ?? '']
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/payloads/:instId/:apiId', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM api_payloads WHERE inst_id=$1 AND api_id=$2',
+      [req.params.instId, req.params.apiId]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Hidden APIs ───────────────────────────────────────────────────────────────
+app.post('/api/hidden', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const { instId, apiId } = req.body;
+  if (!instId || !apiId) return res.status(400).json({ error: 'instId and apiId required' });
+  try {
+    await pool.query(
+      `INSERT INTO hidden_apis (inst_id, user_id, api_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+      [instId, uid, apiId]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/hidden/:instId', requireAuth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM hidden_apis WHERE inst_id=$1', [req.params.instId]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── POST /api/proxy ───────────────────────────────────────────────────────────
-// Forwards API calls server-side — bypasses browser CORS restrictions.
-app.post('/api/proxy', async (req, res) => {
+// Forwards API calls server-side — bypasses browser CORS. Auth required.
+app.post('/api/proxy', requireAuth, async (req, res) => {
   const { url, method = 'GET', headers = {}, body } = req.body;
   if (!url) return res.status(400).json({ error: 'url is required' });
-
   const t0 = Date.now();
   try {
     const opts = { method, headers };
-    if (body !== undefined && method !== 'GET' && method !== 'HEAD') {
+    if (body !== undefined && method !== 'GET' && method !== 'HEAD')
       opts.body = typeof body === 'string' ? body : JSON.stringify(body);
-    }
     const r   = await fetch(url, opts);
     const txt = await r.text();
     res.json({ status: r.status, ok: r.ok, body: txt, time: Date.now() - t0 });
-  } catch (err) {
-    console.error('[POST /api/proxy]', err.message, '→', url);
-    res.status(502).json({ error: err.message, time: Date.now() - t0 });
+  } catch (e) {
+    console.error('[POST /api/proxy]', e.message, '→', url);
+    res.status(502).json({ error: e.message, time: Date.now() - t0 });
   }
 });
 
@@ -371,8 +387,8 @@ app.get('/api/health', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT now() AS ts');
     res.json({ ok: true, db: 'connected', ts: rows[0].ts });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 

@@ -3,17 +3,47 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CPAAS SMS Sanity Runner</title>
+<title>CERF SMS Sanity Runner</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
+<!-- ── Auth screen (shown before login) ──────────────────────────────────── -->
+<div id="authScreen" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:10000;display:flex;align-items:center;justify-content:center">
+  <div style="width:360px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:32px 28px;box-shadow:0 8px 40px rgba(0,0,0,.5)">
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="font-size:32px;margin-bottom:8px">📡</div>
+      <div style="font-size:18px;font-weight:800;color:var(--text)">CERF API Sanity Runner</div>
+      <div style="font-size:13px;color:var(--text3);margin-top:4px">Sign in to access your workspace</div>
+    </div>
+
+    <!-- Tab switcher -->
+    <div style="display:flex;background:var(--bg);border-radius:8px;padding:3px;margin-bottom:20px">
+      <button id="authTabLogin" onclick="authSwitchTab('login')"
+        style="flex:1;padding:7px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-weight:600;font-size:13px;cursor:pointer">Sign In</button>
+      <button id="authTabRegister" onclick="authSwitchTab('register')"
+        style="flex:1;padding:7px;border:none;border-radius:6px;background:transparent;color:var(--text2);font-weight:600;font-size:13px;cursor:pointer">Register</button>
+    </div>
+
+    <div class="fg"><input class="fi" id="authEmail" type="email" placeholder="Email address" autocomplete="email"></div>
+    <div class="fg"><input class="fi" id="authPass"  type="password" placeholder="Password (min 8 chars)" autocomplete="current-password"></div>
+    <div id="authErr" style="display:none;color:var(--red);font-size:12px;margin:-8px 0 10px;padding:8px 10px;background:rgba(239,68,68,.1);border-radius:6px"></div>
+    <button id="authSubmitBtn" onclick="authSubmit()"
+      style="width:100%;padding:11px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;margin-top:4px">Sign In</button>
+    <div style="margin-top:14px;text-align:center;font-size:12px;color:var(--text3)">
+      Your data is private to your account.
+    </div>
+  </div>
+</div>
+
 <div class="hdr">
-  <div class="logo">📡 <em>CPAAS</em> API Sanity Runner <span class="badge">v3.0</span></div>
+  <div class="logo">📡 <em>CERF</em> API Sanity Runner <span class="badge">v3.0</span></div>
   <div class="ml">
+    <span id="authUserBadge" style="font-size:12px;color:var(--text3);margin-right:8px"></span>
     <button class="btn btn-g" onclick="_exportCfg()">⬇ Export</button>
     <button class="btn btn-g" onclick="document.getElementById('imp').click()">⬆ Import</button>
     <input type="file" id="imp" accept=".json" style="display:none" onchange="_importCfg(event)">
+    <button class="btn btn-g" onclick="authLogout()" style="color:var(--red);border-color:var(--red)">⏻ Logout</button>
   </div>
 </div>
 

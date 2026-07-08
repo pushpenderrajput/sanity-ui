@@ -68,43 +68,78 @@ function getPayload(iid,api){
 }
 function readPayloadEl(iid,apiId){ return document.getElementById('pe_'+iid+'_'+apiId)?.value; }
 
-// ── Persistence — via Express backend ────────────────────────────────────────
-let _lastServerVersion = null;  // ISO string of last known DB updated_at
-let _saving = false;            // guard: don't poll-reload while saving
+// ── Auth state ────────────────────────────────────────────────────────────────
+let _authToken  = localStorage.getItem('cerf_token')  || null;
+let _authEmail  = localStorage.getItem('cerf_email')  || null;
 
-async function save(){
+// Authenticated fetch — injects Bearer token; redirects to login on 401
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (_authToken) headers['Authorization'] = 'Bearer ' + _authToken;
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 401) { authLogout(); return r; }
+  return r;
+}
+
+// ── Persistence — granular endpoints ─────────────────────────────────────────
+let _lastServerVersion = null;
+let _saving = false;
+
+async function apiSaveInst(inst) {
   _saving = true;
-  try{
-    await fetch('/api/config',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({instances,payloads,customApis,instVars,hiddenApis})
+  try { await api('/api/instances', { method:'POST', body: JSON.stringify(inst) }); }
+  catch(e) { console.error('[apiSaveInst]', e); }
+  finally { setTimeout(() => { _saving = false; }, 500); }
+}
+
+async function apiSaveApi(instId, a, sortOrder = 0) {
+  _saving = true;
+  try {
+    await api('/api/apis', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: a.id, instId, label: a.label, method: a.method || 'POST',
+        path: a.path, payload: a.payload || {}, channel: a.channel || 'sms', sortOrder,
+      }),
     });
-    // Update our version stamp so polling doesn't trigger a reload for our own save
-    _lastServerVersion = new Date().toISOString();
-  }catch(e){console.error('Save error:',e);}
-  finally{ setTimeout(()=>{ _saving=false; }, 1000); }
+  } catch(e) { console.error('[apiSaveApi]', e); }
+  finally { setTimeout(() => { _saving = false; }, 500); }
 }
 
-// Explicit delete helper — hits a dedicated DELETE endpoint so no save() wipe occurs
-async function dbDel(path){
-  try{
-    await fetch(path, {method:'DELETE'});
-  }catch(e){ console.error('dbDel error:',e); }
+async function apiSaveVar(instId, key, value) {
+  try { await api('/api/variables', { method:'POST', body: JSON.stringify({ instId, key, value }) }); }
+  catch(e) { console.error('[apiSaveVar]', e); }
 }
 
-async function load(){
-  try{
-    const r=await fetch('/api/config');
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const d=await r.json();
+async function apiSavePayload(instId, apiId, payload) {
+  _saving = true;
+  try { await api('/api/payloads', { method:'POST', body: JSON.stringify({ instId, apiId, payload }) }); }
+  catch(e) { console.error('[apiSavePayload]', e); }
+  finally { setTimeout(() => { _saving = false; }, 500); }
+}
+
+async function apiHide(instId, apiId) {
+  try { await api('/api/hidden', { method:'POST', body: JSON.stringify({ instId, apiId }) }); }
+  catch(e) { console.error('[apiHide]', e); }
+}
+
+async function dbDel(path) {
+  try { await api(path, { method:'DELETE' }); }
+  catch(e) { console.error('[dbDel]', e); }
+}
+
+async function load() {
+  try {
+    const r = await api('/api/config');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
     instances  = d.instances  || [];
     payloads   = d.payloads   || {};
     customApis = d.customApis || {};
     instVars   = d.instVars   || {};
     hiddenApis = d.hiddenApis || {};
-  }catch(e){
-    console.error('Load error:',e);
+  } catch(e) {
+    console.error('Load error:', e);
     instances=[]; payloads={}; customApis={}; instVars={}; hiddenApis={};
   }
 }
@@ -118,7 +153,7 @@ function startPolling(){
     if(editing) return;                                    // don't interrupt typing
 
     try{
-      const r=await fetch('/api/config/version');
+      const r=await api('/api/config/version');
       const d=await r.json();
       const serverVer=d.updatedAt;
       if(!serverVer) return;
@@ -150,6 +185,69 @@ function _showSyncBadge(){
   el._t=setTimeout(()=>{ el.style.opacity='0'; },2200);
 }
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
+
+// ── Auth UI ───────────────────────────────────────────────────────────────────
+let _authMode = 'login'; // 'login' | 'register'
+
+function authSwitchTab(mode) {
+  _authMode = mode;
+  const isReg = mode === 'register';
+  document.getElementById('authTabLogin').style.cssText    = isReg ? 'flex:1;padding:7px;border:none;border-radius:6px;background:transparent;color:var(--text2);font-weight:600;font-size:13px;cursor:pointer' : 'flex:1;padding:7px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-weight:600;font-size:13px;cursor:pointer';
+  document.getElementById('authTabRegister').style.cssText = isReg ? 'flex:1;padding:7px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-weight:600;font-size:13px;cursor:pointer' : 'flex:1;padding:7px;border:none;border-radius:6px;background:transparent;color:var(--text2);font-weight:600;font-size:13px;cursor:pointer';
+  document.getElementById('authSubmitBtn').textContent = isReg ? 'Create Account' : 'Sign In';
+  document.getElementById('authErr').style.display = 'none';
+}
+
+async function authSubmit() {
+  const email = document.getElementById('authEmail').value.trim();
+  const pass  = document.getElementById('authPass').value;
+  const errEl = document.getElementById('authErr');
+  const btn   = document.getElementById('authSubmitBtn');
+  errEl.style.display = 'none';
+  if (!email || !pass) { errEl.textContent = 'Email and password are required.'; errEl.style.display='block'; return; }
+
+  btn.disabled = true;
+  btn.textContent = _authMode === 'login' ? 'Signing in…' : 'Creating account…';
+  try {
+    const r = await fetch('/api/auth/' + _authMode, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: pass }),
+    });
+    const d = await r.json();
+    if (!r.ok) { errEl.textContent = d.error || 'Something went wrong.'; errEl.style.display='block'; return; }
+    // Store credentials
+    _authToken  = d.token;
+    _authEmail  = d.email;
+    localStorage.setItem('cerf_token',  d.token);
+    localStorage.setItem('cerf_email',  d.email);
+    localStorage.setItem('cerf_userId', d.userId);
+    document.getElementById('authScreen').style.display = 'none';
+    document.getElementById('authUserBadge').textContent = '👤 ' + d.email;
+    await appStart();
+  } catch(e) {
+    errEl.textContent = 'Network error — ' + e.message;
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = _authMode === 'login' ? 'Sign In' : 'Create Account';
+  }
+}
+
+function authLogout() {
+  localStorage.removeItem('cerf_token');
+  localStorage.removeItem('cerf_email');
+  localStorage.removeItem('cerf_userId');
+  _authToken = null; _authEmail = null;
+  instances=[]; customApis={}; instVars={}; hiddenApis={}; payloads={}; activeId=null;
+  document.getElementById('authScreen').style.display = 'flex';
+  document.getElementById('authUserBadge').textContent = '';
+}
+
+// Allow Enter key in auth form
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.getElementById('authScreen').style.display !== 'none') authSubmit();
+});
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 function renderSidebar(){
@@ -270,7 +368,7 @@ function attachPayloadListeners(iid){
     const aid=id.slice(('pe_'+iid+'_').length);
     ta.addEventListener('input',function(){
       payloads[iid+'_'+aid]=this.value;
-      save();
+      apiSavePayload(iid, aid, this.value);
     });
   });
 }
@@ -514,9 +612,8 @@ async function callApi(iid,api){
   const t0=Date.now();
   try{
     // Route through /api/proxy so Node makes the request — avoids CORS entirely
-    const r=await fetch('/api/proxy',{
+    const r=await api('/api/proxy',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
       body:JSON.stringify({url:api.url,method:api.method,headers:api.headers,body})
     });
     const d=await r.json();
@@ -532,7 +629,7 @@ async function callApi(iid,api){
 }
 
 function resetRes(iid){results[iid]={};renderMain();renderSidebar();}
-function resetPayload(iid,aid){delete payloads[iid+'_'+aid];save();renderMain();}
+function resetPayload(iid,aid){delete payloads[iid+'_'+aid];dbDel('/api/payloads/'+iid+'/'+aid);renderMain();}
 
 // ── Run Selected ──────────────────────────────────────────────────────────────
 async function runSelected(iid){
@@ -647,7 +744,7 @@ function hideApi(iid,aid,type,e){
   if(type==='default'){
     if(!hiddenApis[iid])hiddenApis[iid]=[];
     if(!hiddenApis[iid].includes(aid))hiddenApis[iid].push(aid);
-    save();  // upsert the hidden entry
+    apiHide(iid, aid);
   } else {
     if(customApis[iid])customApis[iid]=customApis[iid].filter(a=>a.id!==aid);
     dbDel('/api/apis/'+aid);  // explicit DELETE — safe for multi-user
@@ -673,11 +770,13 @@ function deleteSelected(iid){
     customApis[iid]=customApis[iid].filter(a=>!customIds.includes(a.id));
     customIds.forEach(id=>dbDel('/api/apis/'+id));
   }
-  // Hide defaults — upsert hidden entries
+  // Hide defaults — explicit per-row insert
   if(defaultIds.length){
     if(!hiddenApis[iid])hiddenApis[iid]=[];
-    defaultIds.forEach(id=>{if(!hiddenApis[iid].includes(id))hiddenApis[iid].push(id);});
-    save();
+    defaultIds.forEach(id=>{
+      if(!hiddenApis[iid].includes(id))hiddenApis[iid].push(id);
+      apiHide(iid, id);
+    });
   }
   // Clear selection + results for deleted
   ids.forEach(id=>{
@@ -689,7 +788,7 @@ function deleteSelected(iid){
 
 function restoreHidden(iid){
   hiddenApis[iid]=[];
-  dbDel('/api/hidden/'+iid);  // explicit DELETE — clears just this instance's hidden set
+  dbDel('/api/hidden/'+iid);
   renderMain(); renderSidebar();
 }
 
@@ -875,7 +974,7 @@ function addVar(iid){
   let k='variable'+(Object.keys(instVars[iid]).length+1);
   while(instVars[iid].hasOwnProperty(k)) k+='_';
   instVars[iid][k]='';
-  save();
+  apiSaveVar(iid, k, '');
   // Re-render just the vars panel in place (avoid full re-render to keep open state)
   const panel=document.getElementById('varsPanel_'+iid);
   if(panel){
@@ -896,15 +995,17 @@ function updateVar(iid,idx,field,val){
   if(field==='key'){
     const oldKey=entries[idx][0];
     if(oldKey===val)return;
-    // rename: delete old key explicitly, then upsert new key via save()
+    const oldVal=entries[idx][1];
     const newVars={};
     entries.forEach(([k,v],i)=>{ newVars[i===idx?val:k]=v; });
     instVars[iid]=newVars;
-    dbDel('/api/vars/'+iid+'/'+encodeURIComponent(oldKey));
+    dbDel('/api/variables/'+iid+'/'+encodeURIComponent(oldKey));
+    apiSaveVar(iid, val, oldVal);
   } else {
-    instVars[iid][entries[idx][0]]=val;
+    const key=entries[idx][0];
+    instVars[iid][key]=val;
+    apiSaveVar(iid, key, val);
   }
-  save();
 }
 
 function deleteVar(iid,idx){
@@ -913,7 +1014,7 @@ function deleteVar(iid,idx){
   if(idx>=entries.length)return;
   const key=entries[idx][0];
   delete instVars[iid][key];
-  dbDel('/api/vars/'+iid+'/'+encodeURIComponent(key));  // explicit DELETE
+  dbDel('/api/variables/'+iid+'/'+encodeURIComponent(key));
   const panel=document.getElementById('varsPanel_'+iid);
   if(panel){
     const tmp=document.createElement('div'); tmp.innerHTML=buildVarsPanel(iid);
@@ -928,7 +1029,7 @@ function deleteVar(iid,idx){
 function clearVars(iid){
   if(!confirm('Clear all variables for this instance?'))return;
   instVars[iid]={};
-  dbDel('/api/vars/'+iid);  // explicit DELETE — wipes only this instance's vars
+  dbDel('/api/variables/'+iid);
   const panel=document.getElementById('varsPanel_'+iid);
   if(panel){
     const tmp=document.createElement('div'); tmp.innerHTML=buildVarsPanel(iid);
@@ -1167,10 +1268,11 @@ function importCollection(){
     const idx=parseInt(item.dataset.idx);
     const api=_colParsed[idx];
     if(!api)return;
-    customApis[activeId].push({id:'c_'+uid(),label:api.label,method:api.method,path:api.path,payload:api.payload,channel});
+    const newApi={id:'c_'+uid(),label:api.label,method:api.method,path:api.path,payload:api.payload,channel};
+    customApis[activeId].push(newApi);
+    apiSaveApi(activeId, newApi, customApis[activeId].length-1);
     imported++;
   });
-  save();
   closeModal('colModal');
   colClearPreview();
   renderMain();
@@ -1233,13 +1335,16 @@ function saveManualApi(){
   const channel = document.getElementById('m-channel')?.value || 'sms';
   if(!customApis[activeId])customApis[activeId]=[];
 
+  let savedApi;
   if(_editingCustomId){
     const idx=customApis[activeId].findIndex(a=>a.id===_editingCustomId);
-    if(idx>-1) customApis[activeId][idx]={...customApis[activeId][idx],label,method,path,payload,channel};
+    if(idx>-1){customApis[activeId][idx]={...customApis[activeId][idx],label,method,path,payload,channel};savedApi=customApis[activeId][idx];}
   } else {
-    customApis[activeId].push({id:'c_'+uid(),label,method,path,payload,channel});
+    savedApi={id:'c_'+uid(),label,method,path,payload,channel};
+    customApis[activeId].push(savedApi);
   }
-  save(); closeModal('manualModal'); _editingCustomId=null;
+  if(savedApi) apiSaveApi(activeId, savedApi, customApis[activeId].length-1);
+  closeModal('manualModal'); _editingCustomId=null;
   renderMain(); renderSidebar();
 }
 
@@ -1289,8 +1394,10 @@ function addApiFromCurl(){
   if(!_parsedCurl){try{_parsedCurl=parseCurl(raw);}catch(e){alert('Parse error: '+e.message);return;}}
   if(!activeId){alert('Select an instance first.');return;}
   if(!customApis[activeId])customApis[activeId]=[];
-  customApis[activeId].push({id:'c_'+uid(),label,method:_parsedCurl.method,path:_parsedCurl.path,payload:_parsedCurl.body,channel});
-  save(); closeModal('curlModal'); _parsedCurl=null;
+  const curlApi={id:'c_'+uid(),label,method:_parsedCurl.method,path:_parsedCurl.path,payload:_parsedCurl.body,channel};
+  customApis[activeId].push(curlApi);
+  apiSaveApi(activeId, curlApi, customApis[activeId].length-1);
+  closeModal('curlModal'); _parsedCurl=null;
   renderMain(); renderSidebar();
 }
 
@@ -1334,9 +1441,11 @@ function saveInst(){
   const token=document.getElementById('f-token').value.trim();
   const cookie=document.getElementById('f-cookie').value.trim();
   if(!name||!url){alert('Name and URL required.');return;}
-  if(editId){const i=instances.find(x=>x.id===editId);if(i){i.name=name;i.url=url;i.token=token;i.cookie=cookie;}}
-  else instances.push({id:uid(),name,url,token,cookie});
-  save(); closeModal('instModal'); renderSidebar();
+  let inst;
+  if(editId){inst=instances.find(x=>x.id===editId);if(inst){inst.name=name;inst.url=url;inst.token=token;inst.cookie=cookie;}}
+  else{inst={id:uid(),name,url,token,cookie};instances.push(inst);}
+  apiSaveInst(inst);
+  closeModal('instModal'); renderSidebar();
   if(activeId===editId||!editId)renderMain();
 }
 
@@ -1381,7 +1490,11 @@ function _importCfg(e){
       if(d.customApis)customApis=d.customApis;
       if(d.instVars)instVars=d.instVars;
       if(d.hiddenApis)hiddenApis=d.hiddenApis;
-      save();renderSidebar();renderMain();alert('Imported!');
+      // Persist each item via granular endpoints
+      (d.instances||[]).forEach(i=>apiSaveInst(i));
+      Object.entries(d.customApis||{}).forEach(([iid,apis])=>apis.forEach((a,idx)=>apiSaveApi(iid,a,idx)));
+      Object.entries(d.instVars||{}).forEach(([iid,vars])=>Object.entries(vars).forEach(([k,v])=>apiSaveVar(iid,k,v)));
+      renderSidebar();renderMain();alert('Imported!');
     }catch(er){alert('Invalid config file.');}
   };
   r.readAsText(f);e.target.value='';
@@ -1391,19 +1504,32 @@ function _importCfg(e){
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function escHtml(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-(async function init(){
-  wireChannelPickers();
+// ── App start (called after auth) ─────────────────────────────────────────────
+async function appStart(){
+  document.getElementById('authUserBadge').textContent = _authEmail ? '👤 ' + _authEmail : '';
   document.getElementById('main').innerHTML=
-    '<div class="empty"><div class="empty-icon" style="font-size:40px">🗄</div><h3>Loading…</h3><p style="color:var(--text3);font-size:13px">Fetching data from server</p></div>';
+    '<div class="empty"><div class="empty-icon" style="font-size:40px">🗄</div><h3>Loading…</h3><p style="color:var(--text3);font-size:13px">Fetching your data</p></div>';
   document.getElementById('instList').innerHTML=
     '<div style="padding:16px;color:var(--text3);font-size:13px;text-align:center">Loading…</div>';
+  activeId = null; results = {};
 
   await load();
-
   renderSidebar();
   if(instances.length>0) selectInst(instances[0].id);
   else renderMain();
+  startPolling();
+}
 
-  startPolling();   // sync changes from other users every 5 s
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async function init(){
+  wireChannelPickers();
+  if(!_authToken){
+    // No token — show login screen
+    document.getElementById('authScreen').style.display='flex';
+    document.getElementById('main').innerHTML='<div class="empty"><h3>Please sign in</h3></div>';
+    return;
+  }
+  // Token present — try to load; authLogout() fires on 401
+  document.getElementById('authScreen').style.display='none';
+  await appStart();
 })();
