@@ -1087,11 +1087,11 @@ function parseOpenApi(json){
 function extractPath(url){
   if(!url) return '/';
   try{
-    const u=new URL(url.replace(/\{\{[^}]+\}\}/g,'placeholder'));
+    const u=new URL(url.replace(/\{\{[^}]+\}\}/g,''));
     return u.pathname+(u.search||'');
   }catch(e){
     // Maybe it's already a path or has template variables
-    const noProto=url.replace(/^https?:\/\/[^/]+/,'').replace(/\{\{[^}]+\}\}/g,'placeholder');
+    const noProto=url.replace(/^https?:\/\/[^/]+/,'').replace(/\{\{[^}]+\}\}/g,'');
     return noProto||'/';
   }
 }
