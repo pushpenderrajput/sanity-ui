@@ -298,7 +298,9 @@ function buildVarsPanel(iid){
   const rows=entries.map(([k,v],i)=>
     '<div class="var-row" data-vi="'+i+'">'+
       '<span class="var-token">{{</span>'+
-      '<input class="var-key-in" value="'+esc(k)+'" placeholder="variable_name" data-vi="'+i+'" data-iid="'+iid+'" onchange="updateVar(\''+iid+'\','+i+',\'key\',this.value)">'+
+      '<input class="var-key-in" style="width:'+getVarWidth(k)+'ch" value="'+esc(k)+'" placeholder="variable_name" data-vi="'+i+'" data-iid="'+iid+'" '+
+        'oninput="this.style.width=getVarWidth(this.value)+\'ch\'" '+
+        'onchange="updateVar(\''+iid+'\','+i+',\'key\',this.value)">'+
       '<span class="var-token">}}</span>'+
       '<span class="var-eq">=</span>'+
       '<input class="var-val-in" value="'+esc(v)+'" placeholder="value" data-vi="'+i+'" data-iid="'+iid+'" onchange="updateVar(\''+iid+'\','+i+',\'val\',this.value)">'+
@@ -321,6 +323,10 @@ function buildVarsPanel(iid){
       '</div>'+
     '</div>'+
   '</div>';
+}
+function getVarWidth(str){
+  // min width so empty/short names still look ok, plus a little padding
+  return Math.max((str||'').length, 8) + 1;
 }
 
 function buildCard(inst,api,res){
@@ -1025,11 +1031,11 @@ function parseOpenApi(json){
 function extractPath(url){
   if(!url) return '/';
   try{
-    const u=new URL(url.replace(/\{\{[^}]+\}\}/g,'placeholder'));
+    const u=new URL(url.replace(/\{\{[^}]+\}\}/g,''));
     return u.pathname+(u.search||'');
   }catch(e){
     // Maybe it's already a path or has template variables
-    const noProto=url.replace(/^https?:\/\/[^/]+/,'').replace(/\{\{[^}]+\}\}/g,'placeholder');
+    const noProto=url.replace(/^https?:\/\/[^/]+/,'').replace(/\{\{[^}]+\}\}/g,'');
     return noProto||'/';
   }
 }
