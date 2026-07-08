@@ -69,14 +69,21 @@ function getPayload(iid,api){
 function readPayloadEl(iid,apiId){ return document.getElementById('pe_'+iid+'_'+apiId)?.value; }
 
 // ── Persistence — via Express backend ────────────────────────────────────────
+let _lastServerVersion = null;  // ISO string of last known DB updated_at
+let _saving = false;            // guard: don't poll-reload while saving
+
 async function save(){
+  _saving = true;
   try{
     await fetch('/api/config',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({instances,payloads,customApis,instVars,hiddenApis})
     });
+    // Update our version stamp so polling doesn't trigger a reload for our own save
+    _lastServerVersion = new Date().toISOString();
   }catch(e){console.error('Save error:',e);}
+  finally{ setTimeout(()=>{ _saving=false; }, 1000); }
 }
 
 async function load(){
@@ -93,6 +100,47 @@ async function load(){
     console.error('Load error:',e);
     instances=[]; payloads={}; customApis={}; instVars={}; hiddenApis={};
   }
+}
+
+// ── Real-time sync — poll every 5 s for changes from other users ──────────────
+function startPolling(){
+  setInterval(async ()=>{
+    if(_saving) return;                                    // skip during our own save
+    const active=document.activeElement;
+    const editing=active&&(active.tagName==='INPUT'||active.tagName==='TEXTAREA'||active.tagName==='SELECT');
+    if(editing) return;                                    // don't interrupt typing
+
+    try{
+      const r=await fetch('/api/config/version');
+      const d=await r.json();
+      const serverVer=d.updatedAt;
+      if(!serverVer) return;
+      if(_lastServerVersion && serverVer===_lastServerVersion) return;  // no change
+      if(!_lastServerVersion){ _lastServerVersion=serverVer; return; }  // first poll, just record
+
+      // Changes detected from another user — reload silently
+      _lastServerVersion=serverVer;
+      await load();
+      renderSidebar();
+      renderMain();
+      _showSyncBadge();
+    }catch(e){ /* silent — offline or transient error */ }
+  }, 5000);
+}
+
+function _showSyncBadge(){
+  const id='_syncBadge';
+  let el=document.getElementById(id);
+  if(!el){
+    el=document.createElement('div');
+    el.id=id;
+    el.style.cssText='position:fixed;bottom:20px;right:20px;background:var(--surface);border:1px solid var(--green);color:var(--green);padding:7px 14px;border-radius:8px;font-size:12px;font-weight:600;z-index:9999;pointer-events:none;transition:opacity .4s';
+    document.body.appendChild(el);
+  }
+  el.textContent='🔄 Synced with team';
+  el.style.opacity='1';
+  clearTimeout(el._t);
+  el._t=setTimeout(()=>{ el.style.opacity='0'; },2200);
 }
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
 
@@ -298,9 +346,7 @@ function buildVarsPanel(iid){
   const rows=entries.map(([k,v],i)=>
     '<div class="var-row" data-vi="'+i+'">'+
       '<span class="var-token">{{</span>'+
-      '<input class="var-key-in" style="width:'+getVarWidth(k)+'ch" value="'+esc(k)+'" placeholder="variable_name" data-vi="'+i+'" data-iid="'+iid+'" '+
-        'oninput="this.style.width=getVarWidth(this.value)+\'ch\'" '+
-        'onchange="updateVar(\''+iid+'\','+i+',\'key\',this.value)">'+
+      '<input class="var-key-in" value="'+esc(k)+'" placeholder="variable_name" data-vi="'+i+'" data-iid="'+iid+'" onchange="updateVar(\''+iid+'\','+i+',\'key\',this.value)">'+
       '<span class="var-token">}}</span>'+
       '<span class="var-eq">=</span>'+
       '<input class="var-val-in" value="'+esc(v)+'" placeholder="value" data-vi="'+i+'" data-iid="'+iid+'" onchange="updateVar(\''+iid+'\','+i+',\'val\',this.value)">'+
@@ -323,10 +369,6 @@ function buildVarsPanel(iid){
       '</div>'+
     '</div>'+
   '</div>';
-}
-function getVarWidth(str){
-  // min width so empty/short names still look ok, plus a little padding
-  return Math.max((str||'').length, 8) + 1;
 }
 
 function buildCard(inst,api,res){
@@ -1031,11 +1073,11 @@ function parseOpenApi(json){
 function extractPath(url){
   if(!url) return '/';
   try{
-    const u=new URL(url.replace(/\{\{[^}]+\}\}/g,''));
+    const u=new URL(url.replace(/\{\{[^}]+\}\}/g,'placeholder'));
     return u.pathname+(u.search||'');
   }catch(e){
     // Maybe it's already a path or has template variables
-    const noProto=url.replace(/^https?:\/\/[^/]+/,'').replace(/\{\{[^}]+\}\}/g,'');
+    const noProto=url.replace(/^https?:\/\/[^/]+/,'').replace(/\{\{[^}]+\}\}/g,'placeholder');
     return noProto||'/';
   }
 }
@@ -1346,4 +1388,6 @@ function escHtml(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt
   renderSidebar();
   if(instances.length>0) selectInst(instances[0].id);
   else renderMain();
+
+  startPolling();   // sync changes from other users every 5 s
 })();
