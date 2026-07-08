@@ -107,6 +107,7 @@ async function apiSaveApi(instId, a, sortOrder = 0) {
 }
 
 async function apiSaveVar(instId, key, value) {
+  _saving = true;
   try { await api('/api/variables', { method:'POST', body: JSON.stringify({ instId, key, value }) }); }
   catch(e) { console.error('[apiSaveVar]', e); }
 }
@@ -119,11 +120,13 @@ async function apiSavePayload(instId, apiId, payload) {
 }
 
 async function apiHide(instId, apiId) {
+  _saving = true;
   try { await api('/api/hidden', { method:'POST', body: JSON.stringify({ instId, apiId }) }); }
   catch(e) { console.error('[apiHide]', e); }
 }
 
 async function dbDel(path) {
+  _saving = true;
   try { await api(path, { method:'DELETE' }); }
   catch(e) { console.error('[dbDel]', e); }
 }
