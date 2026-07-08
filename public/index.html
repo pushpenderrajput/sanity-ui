@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CERF SMS Sanity Runner</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div class="hdr">
+  <div class="logo">📡 <em>CERF</em> API Sanity Runner <span class="badge">v3.0</span></div>
+  <div class="ml">
+    <button class="btn btn-g" onclick="_exportCfg()">⬇ Export</button>
+    <button class="btn btn-g" onclick="document.getElementById('imp').click()">⬆ Import</button>
+    <input type="file" id="imp" accept=".json" style="display:none" onchange="_importCfg(event)">
+  </div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+    <div class="sb-hdr">Instances <button class="btn btn-g btn-sm" onclick="openInstModal()">+ Add</button></div>
+    <div class="inst-list" id="instList"></div>
+    <div class="sb-foot">Select an instance → Run All APIs</div>
+  </div>
+  <div class="main" id="main">
+    <div class="empty">
+      <div class="empty-icon">🚀</div>
+      <h3>Select an Instance</h3>
+      <p>Pick one from the sidebar to view and run its APIs.</p>
+      <button class="btn btn-p" onclick="openInstModal()">+ Add Instance</button>
+    </div>
+  </div>
+</div>
+
+<!-- Instance Modal -->
+<div class="overlay" id="instModal">
+  <div class="modal">
+    <div class="m-hdr">
+      <div class="m-title" id="instModalTitle">Add Instance</div>
+      <button class="m-close" onclick="closeModal('instModal')">✕</button>
+    </div>
+    <div class="m-body">
+      <div class="fg"><div class="flabel">Instance Name</div><input class="fi" id="f-name" placeholder="Dev / Staging / CERF Prod / Singapore"></div>
+      <div class="fg"><div class="flabel">Base URL</div><input class="fi" id="f-url" placeholder="https://test.cerfsolutions.com"></div>
+      <div class="fg"><div class="flabel">Bearer Token</div><input class="fi" id="f-token" placeholder="193|xxxxxxxxxxxxxxx"></div>
+      <div class="fg"><div class="flabel">AWSALB Cookie <span style="color:var(--text3);font-weight:400;text-transform:none">(optional)</span></div><input class="fi" id="f-cookie" placeholder="AWSALB=..."></div>
+    </div>
+    <div class="m-foot">
+      <button class="btn btn-g" onclick="closeModal('instModal')">Cancel</button>
+      <button class="btn btn-p" id="instSaveBtn" onclick="saveInst()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import Collection Modal -->
+<div class="overlay" id="colModal">
+  <div class="modal" style="width:680px">
+    <div class="m-hdr">
+      <div class="m-title">📦 Import from Collection</div>
+      <button class="m-close" onclick="closeModal('colModal')">✕</button>
+    </div>
+    <div class="m-body">
+      <!-- Drop zone -->
+      <div class="col-drop" id="colDrop" onclick="document.getElementById('colFile').click()" ondragover="colDragOver(event)" ondragleave="colDragLeave(event)" ondrop="colDrop(event)">
+        <input type="file" id="colFile" accept=".json" onchange="colFileChosen(event)">
+        <div style="font-size:28px;margin-bottom:6px">📂</div>
+        <div><b>Drop a Postman collection JSON here</b> or click to browse</div>
+        <div style="font-size:12px;margin-top:4px;color:var(--text3)">Supports Postman v2.0 / v2.1 · OpenAPI 3.0</div>
+      </div>
+      <div style="text-align:center;color:var(--text3);font-size:12px;margin:-6px 0">— or paste JSON below —</div>
+      <textarea class="fi fi-ta" id="colJson" placeholder='Paste Postman collection or OpenAPI JSON here…' style="min-height:100px" oninput="colClearPreview()"></textarea>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-p btn-sm" onclick="parseCollection()">🔍 Parse Collection</button>
+        <div class="col-parse-info" id="colInfo" style="display:none"></div>
+      </div>
+      <div class="fg" style="margin-top:10px">
+        <div class="flabel">Assign to Channel</div>
+        <div class="ch-select-row" id="col-ch-row">
+          <label class="ch-sel-opt active" data-ch="sms"><span>📱</span> SMS</label>
+          <label class="ch-sel-opt" data-ch="rcs"><span>💬</span> RCS</label>
+          <label class="ch-sel-opt" data-ch="wa"><span>🟢</span> WhatsApp</label>
+          <label class="ch-sel-opt" data-ch="email"><span>📧</span> Email</label>
+          <label class="ch-sel-opt" data-ch="other"><span>🔧</span> Other</label>
+        </div>
+        <input type="hidden" id="col-channel" value="sms">
+      </div>
+      <!-- API Preview -->
+      <div id="colPreviewWrap" style="display:none">
+        <div class="sel-all-row">
+          <input type="checkbox" id="selAll" checked onchange="colToggleAll(this.checked)">
+          <label for="selAll" style="cursor:pointer">Select All</label>
+          <span id="selCount" style="margin-left:auto;color:var(--text3)"></span>
+        </div>
+        <div class="api-preview-list" id="colPreviewList"></div>
+      </div>
+    </div>
+    <div class="m-foot">
+      <button class="btn btn-g" onclick="closeModal('colModal')">Cancel</button>
+      <button class="btn btn-s" id="colImportBtn" onclick="importCollection()" style="display:none">✓ Import Selected APIs</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add API Manually Modal -->
+<div class="overlay" id="manualModal">
+  <div class="modal" style="width:600px">
+    <div class="m-hdr">
+      <div class="m-title" id="manualModalTitle">➕ Add API Manually</div>
+      <button class="m-close" onclick="closeModal('manualModal')">✕</button>
+    </div>
+    <div class="m-body">
+      <div class="fg">
+        <div class="flabel">Channel</div>
+        <div class="ch-select-row" id="m-ch-row">
+          <label class="ch-sel-opt active" data-ch="sms"><span>📱</span> SMS</label>
+          <label class="ch-sel-opt" data-ch="rcs"><span>💬</span> RCS</label>
+          <label class="ch-sel-opt" data-ch="wa"><span>🟢</span> WhatsApp</label>
+          <label class="ch-sel-opt" data-ch="email"><span>📧</span> Email</label>
+          <label class="ch-sel-opt" data-ch="other"><span>🔧</span> Other</label>
+        </div>
+        <input type="hidden" id="m-channel" value="sms">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="fg">
+          <div class="flabel">API Label / Name</div>
+          <input class="fi" id="m-label" placeholder="e.g. OTP Send">
+        </div>
+        <div class="fg">
+          <div class="flabel">Method</div>
+          <select class="fi" id="m-method">
+            <option value="POST">POST</option>
+            <option value="GET">GET</option>
+            <option value="PUT">PUT</option>
+            <option value="PATCH">PATCH</option>
+            <option value="DELETE">DELETE</option>
+          </select>
+        </div>
+      </div>
+      <div class="fg">
+        <div class="flabel">Endpoint Path</div>
+        <input class="fi" id="m-path" placeholder="/api/sms/send">
+      </div>
+      <div class="fg">
+        <div class="flabel">Request Body (JSON)</div>
+        <textarea class="fi fi-ta" id="m-payload" placeholder='{\n  "key": "value"\n}' style="min-height:160px"></textarea>
+      </div>
+      <div class="info-box" id="m-error" style="display:none;border-color:var(--red);background:rgba(239,68,68,.08);color:var(--red)"></div>
+    </div>
+    <div class="m-foot">
+      <button class="btn btn-g" onclick="closeModal('manualModal')">Cancel</button>
+      <button class="btn btn-s" onclick="saveManualApi()" id="manualSaveBtn">✓ Add API</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add API via cURL Modal -->
+<div class="overlay" id="curlModal">
+  <div class="modal" style="width:640px">
+    <div class="m-hdr">
+      <div class="m-title">➕ Add API via cURL</div>
+      <button class="m-close" onclick="closeModal('curlModal')">✕</button>
+    </div>
+    <div class="m-body">
+      <div class="fg">
+        <div class="flabel">Channel</div>
+        <div class="ch-select-row" id="c-ch-row">
+          <label class="ch-sel-opt active" data-ch="sms"><span>📱</span> SMS</label>
+          <label class="ch-sel-opt" data-ch="rcs"><span>💬</span> RCS</label>
+          <label class="ch-sel-opt" data-ch="wa"><span>🟢</span> WhatsApp</label>
+          <label class="ch-sel-opt" data-ch="email"><span>📧</span> Email</label>
+          <label class="ch-sel-opt" data-ch="other"><span>🔧</span> Other</label>
+        </div>
+        <input type="hidden" id="c-channel" value="sms">
+      </div>
+      <div class="fg"><div class="flabel">API Label / Name</div><input class="fi" id="c-label" placeholder="e.g. OTP Send, DLT Template Send"></div>
+      <div class="fg">
+        <div class="flabel">Paste cURL Command <button class="btn btn-g btn-sm" onclick="parseCurlPreview()">🔍 Parse</button></div>
+        <textarea class="fi fi-ta" id="c-curl" placeholder="curl --location 'https://...' \&#10;  --header 'Authorization: Bearer ...' \&#10;  --data '{...}'" style="min-height:150px" oninput="clearCurlParse()"></textarea>
+      </div>
+      <div class="parsed-ok" id="curlOk"></div>
+      <div class="parsed-err" id="curlErr"></div>
+      <div class="info-box">💡 The base URL is replaced with this instance's URL. Auth headers use the instance token.</div>
+    </div>
+    <div class="m-foot">
+      <button class="btn btn-g" onclick="closeModal('curlModal')">Cancel</button>
+      <button class="btn btn-g" onclick="parseCurlPreview()">🔍 Parse & Preview</button>
+      <button class="btn btn-s" onclick="addApiFromCurl()">✓ Add API</button>
+    </div>
+  </div>
+</div>
+
+<!-- Report Modal -->
+<div class="overlay" id="reportModal">
+  <div class="modal" style="width:820px;max-height:92vh">
+    <div class="m-hdr">
+      <div>
+        <div class="m-title" id="rptTitle">📊 Run Report</div>
+        <div id="rptMeta" style="font-size:12px;color:var(--text3);margin-top:3px"></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-g btn-sm" onclick="exportReport('html')">⬇ HTML</button>
+        <button class="btn btn-g btn-sm" onclick="exportReport('json')">⬇ JSON</button>
+        <button class="btn btn-g btn-sm" onclick="exportReport('csv')">⬇ CSV</button>
+        <button class="m-close" onclick="closeModal('reportModal')">✕</button>
+      </div>
+    </div>
+    <div class="m-body" style="padding:0">
+      <!-- Summary bar -->
+      <div id="rptSummary" style="display:flex;gap:0;border-bottom:1px solid var(--border)"></div>
+      <!-- Table -->
+      <div style="overflow-y:auto;max-height:calc(92vh - 200px)">
+        <table class="rpt-table" id="rptTable">
+          <thead>
+            <tr>
+              <th style="width:36px">#</th>
+              <th>API</th>
+              <th style="width:60px">Method</th>
+              <th style="width:100px">Status</th>
+              <th style="width:80px">HTTP</th>
+              <th style="width:80px">Time</th>
+              <th>Response Preview</th>
+            </tr>
+          </thead>
+          <tbody id="rptBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
