@@ -604,9 +604,9 @@ function applyVars(iid,str){
   });
 }
 
-async function callApi(iid,api){
-  const el=document.getElementById('pe_'+iid+'_'+api.id);
-  const rawTemplate=el?el.value:getPayload(iid,api);
+async function callApi(iid,apiDef){
+  const el=document.getElementById('pe_'+iid+'_'+apiDef.id);
+  const rawTemplate=el?el.value:getPayload(iid,apiDef);
   const raw=applyVars(iid,rawTemplate);      // substitute {{vars}} before sending
   let body; try{body=JSON.parse(raw);}catch(e){body=raw;}
   const t0=Date.now();
@@ -614,20 +614,19 @@ async function callApi(iid,api){
     // Route through /api/proxy so Node makes the request — avoids CORS entirely
     const r=await api('/api/proxy',{
       method:'POST',
-      body:JSON.stringify({url:api.url,method:api.method,headers:api.headers,body})
+      body:JSON.stringify({url:apiDef.url,method:apiDef.method,headers:apiDef.headers,body})
     });
     const d=await r.json();
     if(!r.ok && d.error){
-      results[iid][api.id]={status:'error',code:0,body:'Proxy error: '+d.error,time:d.time||Date.now()-t0};
+      results[iid][apiDef.id]={status:'error',code:0,body:'Proxy error: '+d.error,time:d.time||Date.now()-t0};
       return;
     }
     let pretty=d.body; try{pretty=JSON.stringify(JSON.parse(d.body),null,2);}catch(e){}
-    results[iid][api.id]={status:d.ok?'success':'error',code:d.status,body:pretty,time:d.time};
+    results[iid][apiDef.id]={status:d.ok?'success':'error',code:d.status,body:pretty,time:d.time};
   }catch(err){
-    results[iid][api.id]={status:'error',code:0,body:'Request failed: '+err.message,time:Date.now()-t0};
+    results[iid][apiDef.id]={status:'error',code:0,body:'Request failed: '+err.message,time:Date.now()-t0};
   }
 }
-
 function resetRes(iid){results[iid]={};renderMain();renderSidebar();}
 function resetPayload(iid,aid){delete payloads[iid+'_'+aid];dbDel('/api/payloads/'+iid+'/'+aid);renderMain();}
 
