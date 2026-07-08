@@ -102,6 +102,30 @@ app.post('/api/config', async (req, res) => {
 });
 
 /**
+ * POST /api/proxy
+ * Body: { url, method, headers, body }
+ * Forwards the request server-side (bypasses browser CORS restrictions).
+ */
+app.post('/api/proxy', async (req, res) => {
+  const { url, method = 'GET', headers = {}, body } = req.body;
+  if (!url) return res.status(400).json({ error: 'url is required' });
+
+  const t0 = Date.now();
+  try {
+    const opts = { method, headers };
+    if (body !== undefined && method !== 'GET' && method !== 'HEAD') {
+      opts.body = typeof body === 'string' ? body : JSON.stringify(body);
+    }
+    const r   = await fetch(url, opts);
+    const txt = await r.text();
+    res.json({ status: r.status, ok: r.ok, body: txt, time: Date.now() - t0 });
+  } catch (err) {
+    console.error('[POST /api/proxy]', err.message, '→', url);
+    res.status(502).json({ error: err.message, time: Date.now() - t0 });
+  }
+});
+
+/**
  * GET /api/health
  * Quick DB connectivity check.
  */

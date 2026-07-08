@@ -458,12 +458,21 @@ async function callApi(iid,api){
   let body; try{body=JSON.parse(raw);}catch(e){body=raw;}
   const t0=Date.now();
   try{
-    const r=await fetch(api.url,{method:api.method,headers:api.headers,body:JSON.stringify(body),mode:'cors',credentials:'include'});
-    const txt=await r.text();
-    let pretty=txt; try{pretty=JSON.stringify(JSON.parse(txt),null,2);}catch(e){}
-    results[iid][api.id]={status:r.ok?'success':'error',code:r.status,body:pretty,time:Date.now()-t0};
+    // Route through /api/proxy so Node makes the request — avoids CORS entirely
+    const r=await fetch('/api/proxy',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:api.url,method:api.method,headers:api.headers,body})
+    });
+    const d=await r.json();
+    if(!r.ok && d.error){
+      results[iid][api.id]={status:'error',code:0,body:'Proxy error: '+d.error,time:d.time||Date.now()-t0};
+      return;
+    }
+    let pretty=d.body; try{pretty=JSON.stringify(JSON.parse(d.body),null,2);}catch(e){}
+    results[iid][api.id]={status:d.ok?'success':'error',code:d.status,body:pretty,time:d.time};
   }catch(err){
-    results[iid][api.id]={status:'error',code:0,body:'Network/CORS Error: '+err.message+'\n\n→ Use the cURL tab to run from terminal.',time:Date.now()-t0};
+    results[iid][api.id]={status:'error',code:0,body:'Request failed: '+err.message,time:Date.now()-t0};
   }
 }
 
