@@ -211,7 +211,8 @@ app.get('/api/config', async (req, res) => {
 });
 
 // ── POST /api/config ──────────────────────────────────────────────────────────
-// Syncs entire state — upserts new/changed rows, deletes removed rows.
+// UPSERT ONLY — never deletes by absence. Deletions use explicit routes below.
+// This ensures one user's save never destroys another user's additions.
 app.post('/api/config', async (req, res) => {
   const {
     instances  = [],
@@ -225,8 +226,7 @@ app.post('/api/config', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // ── Instances ────────────────────────────────────────────────────────────
-    const instIds = instances.map(i => i.id);
+    // ── Instances: upsert only ────────────────────────────────────────────────
     for (const inst of instances) {
       await client.query(
         `INSERT INTO instances (id, name, url, token, cookie, updated_at)
@@ -236,19 +236,11 @@ app.post('/api/config', async (req, res) => {
         [inst.id, inst.name, inst.url, inst.token||'', inst.cookie||'']
       );
     }
-    // Delete instances no longer in the list
-    if (instIds.length > 0) {
-      await client.query(`DELETE FROM instances WHERE id <> ALL($1)`, [instIds]);
-    } else {
-      await client.query(`DELETE FROM instances`);
-    }
 
-    // ── Custom APIs ───────────────────────────────────────────────────────────
-    const allApiIds = [];
+    // ── Custom APIs: upsert only ──────────────────────────────────────────────
     for (const [instId, apis] of Object.entries(customApis)) {
       for (let i = 0; i < apis.length; i++) {
         const a = apis[i];
-        allApiIds.push(a.id);
         await client.query(
           `INSERT INTO custom_apis (id, inst_id, label, method, path, payload, channel, sort_order, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
@@ -259,29 +251,24 @@ app.post('/api/config', async (req, res) => {
         );
       }
     }
-    if (allApiIds.length > 0) {
-      await client.query(`DELETE FROM custom_apis WHERE id <> ALL($1)`, [allApiIds]);
-    } else {
-      await client.query(`DELETE FROM custom_apis`);
-    }
 
-    // ── Instance variables ────────────────────────────────────────────────────
-    // Replace per-instance (safe: only touches rows for instances in this save)
-    for (const instId of instIds) {
-      await client.query(`DELETE FROM inst_vars WHERE inst_id = $1`, [instId]);
-      const vars = instVars[instId] || {};
+    // ── Instance vars: upsert per key ─────────────────────────────────────────
+    // Key renames and deletes handled by DELETE /api/vars/:instId/:key
+    for (const [instId, vars] of Object.entries(instVars)) {
       for (const [key, value] of Object.entries(vars)) {
         await client.query(
-          `INSERT INTO inst_vars (inst_id, key, value, updated_at) VALUES ($1,$2,$3, now())`,
+          `INSERT INTO inst_vars (inst_id, key, value, updated_at)
+           VALUES ($1,$2,$3, now())
+           ON CONFLICT (inst_id, key) DO UPDATE SET value=$3, updated_at=now()`,
           [instId, key, value||'']
         );
       }
     }
 
-    // ── Hidden APIs ───────────────────────────────────────────────────────────
-    for (const instId of instIds) {
-      await client.query(`DELETE FROM hidden_apis WHERE inst_id = $1`, [instId]);
-      for (const apiId of (hiddenApis[instId] || [])) {
+    // ── Hidden APIs: insert new entries only ──────────────────────────────────
+    // Restoring (clearing) handled by DELETE /api/hidden/:instId
+    for (const [instId, apiIds] of Object.entries(hiddenApis)) {
+      for (const apiId of apiIds) {
         await client.query(
           `INSERT INTO hidden_apis (inst_id, api_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
           [instId, apiId]
@@ -289,7 +276,7 @@ app.post('/api/config', async (req, res) => {
       }
     }
 
-    // ── Payload overrides ─────────────────────────────────────────────────────
+    // ── Payload overrides: upsert ─────────────────────────────────────────────
     for (const [key, payload] of Object.entries(payloads)) {
       const under  = key.indexOf('_');
       if (under < 0) continue;
@@ -312,6 +299,50 @@ app.post('/api/config', async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// ── Explicit DELETE routes ────────────────────────────────────────────────────
+// These are the ONLY way rows get removed — never inferred from absence.
+
+// Delete an instance (cascades to all its APIs, vars, hidden entries, payloads)
+app.delete('/api/instances/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM instances WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Delete a single custom API
+app.delete('/api/apis/:apiId', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM custom_apis WHERE id=$1', [req.params.apiId]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Clear all hidden APIs for an instance (Restore hidden)
+app.delete('/api/hidden/:instId', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM hidden_apis WHERE inst_id=$1', [req.params.instId]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Delete a single variable
+app.delete('/api/vars/:instId/:key', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM inst_vars WHERE inst_id=$1 AND key=$2',
+      [req.params.instId, decodeURIComponent(req.params.key)]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Clear all variables for an instance
+app.delete('/api/vars/:instId', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM inst_vars WHERE inst_id=$1', [req.params.instId]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── POST /api/proxy ───────────────────────────────────────────────────────────

@@ -86,6 +86,13 @@ async function save(){
   finally{ setTimeout(()=>{ _saving=false; }, 1000); }
 }
 
+// Explicit delete helper — hits a dedicated DELETE endpoint so no save() wipe occurs
+async function dbDel(path){
+  try{
+    await fetch(path, {method:'DELETE'});
+  }catch(e){ console.error('dbDel error:',e); }
+}
+
 async function load(){
   try{
     const r=await fetch('/api/config');
@@ -640,12 +647,13 @@ function hideApi(iid,aid,type,e){
   if(type==='default'){
     if(!hiddenApis[iid])hiddenApis[iid]=[];
     if(!hiddenApis[iid].includes(aid))hiddenApis[iid].push(aid);
+    save();  // upsert the hidden entry
   } else {
     if(customApis[iid])customApis[iid]=customApis[iid].filter(a=>a.id!==aid);
+    dbDel('/api/apis/'+aid);  // explicit DELETE — safe for multi-user
   }
   if(selectedApis[iid])selectedApis[iid].delete(aid);
   if(results[iid])delete results[iid][aid];
-  save();
   renderMain(); renderSidebar();
 }
 
@@ -660,26 +668,28 @@ function deleteSelected(iid){
   if(customIds.length)parts.push(customIds.length+' custom API'+(customIds.length>1?'s':''));
   if(defaultIds.length)parts.push(defaultIds.length+' default API'+(defaultIds.length>1?'s (will be hidden)':'(will be hidden)'));
   if(!confirm('Delete '+parts.join(' and ')+'? Custom APIs cannot be undone.'))return;
-  // Delete custom
-  if(customIds.length&&customApis[iid])
+  // Delete custom — explicit per-row DELETE
+  if(customIds.length&&customApis[iid]){
     customApis[iid]=customApis[iid].filter(a=>!customIds.includes(a.id));
-  // Hide defaults
+    customIds.forEach(id=>dbDel('/api/apis/'+id));
+  }
+  // Hide defaults — upsert hidden entries
   if(defaultIds.length){
     if(!hiddenApis[iid])hiddenApis[iid]=[];
     defaultIds.forEach(id=>{if(!hiddenApis[iid].includes(id))hiddenApis[iid].push(id);});
+    save();
   }
   // Clear selection + results for deleted
   ids.forEach(id=>{
     sel.delete(id);
     if(results[iid])delete results[iid][id];
   });
-  save();
   renderMain(); renderSidebar();
 }
 
 function restoreHidden(iid){
   hiddenApis[iid]=[];
-  save();
+  dbDel('/api/hidden/'+iid);  // explicit DELETE — clears just this instance's hidden set
   renderMain(); renderSidebar();
 }
 
@@ -884,10 +894,13 @@ function updateVar(iid,idx,field,val){
   const entries=Object.entries(instVars[iid]);
   if(idx>=entries.length)return;
   if(field==='key'){
-    // rename key preserving order
+    const oldKey=entries[idx][0];
+    if(oldKey===val)return;
+    // rename: delete old key explicitly, then upsert new key via save()
     const newVars={};
     entries.forEach(([k,v],i)=>{ newVars[i===idx?val:k]=v; });
     instVars[iid]=newVars;
+    dbDel('/api/vars/'+iid+'/'+encodeURIComponent(oldKey));
   } else {
     instVars[iid][entries[idx][0]]=val;
   }
@@ -898,8 +911,9 @@ function deleteVar(iid,idx){
   if(!instVars[iid])return;
   const entries=Object.entries(instVars[iid]);
   if(idx>=entries.length)return;
-  delete instVars[iid][entries[idx][0]];
-  save();
+  const key=entries[idx][0];
+  delete instVars[iid][key];
+  dbDel('/api/vars/'+iid+'/'+encodeURIComponent(key));  // explicit DELETE
   const panel=document.getElementById('varsPanel_'+iid);
   if(panel){
     const tmp=document.createElement('div'); tmp.innerHTML=buildVarsPanel(iid);
@@ -914,7 +928,7 @@ function deleteVar(iid,idx){
 function clearVars(iid){
   if(!confirm('Clear all variables for this instance?'))return;
   instVars[iid]={};
-  save();
+  dbDel('/api/vars/'+iid);  // explicit DELETE — wipes only this instance's vars
   const panel=document.getElementById('varsPanel_'+iid);
   if(panel){
     const tmp=document.createElement('div'); tmp.innerHTML=buildVarsPanel(iid);
@@ -1285,7 +1299,8 @@ function delCustomApi(iid,aid,e){
   if(!confirm('Remove this custom API?'))return;
   if(customApis[iid])customApis[iid]=customApis[iid].filter(a=>a.id!==aid);
   if(results[iid])delete results[iid][aid];
-  save(); renderMain(); renderSidebar();
+  dbDel('/api/apis/'+aid);  // explicit DELETE
+  renderMain(); renderSidebar();
 }
 
 // ── Instance CRUD ─────────────────────────────────────────────────────────────
@@ -1330,7 +1345,8 @@ function deleteInst(id){
   if(!inst||!confirm('Delete "'+inst.name+'"?'))return;
   instances=instances.filter(i=>i.id!==id);
   if(activeId===id)activeId=null;
-  save(); renderSidebar(); renderMain();
+  dbDel('/api/instances/'+id);  // cascades: custom_apis, inst_vars, hidden_apis, api_payloads
+  renderSidebar(); renderMain();
 }
 
 function openCurlModal(preChannel){
