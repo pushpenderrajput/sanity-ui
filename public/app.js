@@ -53,12 +53,31 @@ const DEFAULTS=[];
 let _openModalChannel = null; // pre-select channel when opening modal from folder
 
 function getApis(inst){
-  const base=inst.url.replace(/\/$/,''), tok=inst.token, ck=inst.cookie;
-  const hdr=()=>({'Accept':'application/json','Content-Type':'application/json','Authorization':'Bearer '+tok,...(ck?{'Cookie':ck}:{})});
-  const def=DEFAULTS.map(a=>({...a,url:base+a.path,headers:hdr(),isDefault:true}));
-  const cst=(customApis[inst.id]||[]).map(a=>({...a,url:base+a.path,headers:hdr(),isDefault:false}));
-  const hidden=new Set(hiddenApis[inst.id]||[]);
-  return [...def,...cst].filter(a=>!hidden.has(a.id));
+  const base = inst.url.replace(/\/$/,''),
+        tok = inst.token;
+
+  const hdr = () => ({
+    'Accept':'application/json',
+    'Content-Type':'application/json',
+    'Authorization':'Bearer ' + tok
+  });
+
+  const def = DEFAULTS.map(a => ({
+    ...a,
+    url: base + a.path,
+    headers: hdr(),
+    isDefault: true
+  }));
+
+  const cst = (customApis[inst.id] || []).map(a => ({
+    ...a,
+    url: base + a.path,
+    headers: hdr(),
+    isDefault: false
+  }));
+
+  const hidden = new Set(hiddenApis[inst.id] || []);
+  return [...def, ...cst].filter(a => !hidden.has(a.id));
 }
 
 // ── Payload helpers ───────────────────────────────────────────────────────────
@@ -1419,7 +1438,7 @@ function openInstModal(){
   document.getElementById('f-name').value='';
   document.getElementById('f-url').value='https://';
   document.getElementById('f-token').value='';
-  document.getElementById('f-cookie').value='';
+//  document.getElementById('f-cookie').value='';
   document.getElementById('instSaveBtn').textContent='Add Instance';
   document.getElementById('instModal').classList.add('open');
   document.getElementById('f-name').focus();
@@ -1432,23 +1451,47 @@ function openEditModal(id){
   document.getElementById('f-name').value=inst.name;
   document.getElementById('f-url').value=inst.url;
   document.getElementById('f-token').value=inst.token;
-  document.getElementById('f-cookie').value=inst.cookie||'';
+//  document.getElementById('f-cookie').value=inst.cookie||'';
   document.getElementById('instSaveBtn').textContent='Save Changes';
   document.getElementById('instModal').classList.add('open');
 }
 
-function saveInst(){
-  const name=document.getElementById('f-name').value.trim();
-  const url=document.getElementById('f-url').value.trim().replace(/\/$/,'');
-  const token=document.getElementById('f-token').value.trim();
-  const cookie=document.getElementById('f-cookie').value.trim();
-  if(!name||!url){alert('Name and URL required.');return;}
+function saveInst() {
+  const name = document.getElementById('f-name').value.trim();
+  const url = document.getElementById('f-url').value.trim().replace(/\/$/, '');
+  const token = document.getElementById('f-token').value.trim();
+
+  if (!name || !url) {
+    alert('Name and URL required.');
+    return;
+  }
+
   let inst;
-  if(editId){inst=instances.find(x=>x.id===editId);if(inst){inst.name=name;inst.url=url;inst.token=token;inst.cookie=cookie;}}
-  else{inst={id:uid(),name,url,token,cookie};instances.push(inst);}
+
+  if (editId) {
+    inst = instances.find(x => x.id === editId);
+    if (inst) {
+      inst.name = name;
+      inst.url = url;
+      inst.token = token;
+    }
+  } else {
+    inst = {
+      id: uid(),
+      name,
+      url,
+      token
+    };
+    instances.push(inst);
+  }
+
   apiSaveInst(inst);
-  closeModal('instModal'); renderSidebar();
-  if(activeId===editId||!editId)renderMain();
+  closeModal('instModal');
+  renderSidebar();
+
+  if (activeId === editId || !editId) {
+    renderMain();
+  }
 }
 
 function deleteInst(id){
